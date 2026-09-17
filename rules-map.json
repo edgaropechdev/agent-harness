@@ -1,0 +1,10 @@
+[
+  ["lib/invoice*.ts",        "facturacion"],
+  ["lib/money.ts",           "facturacion"],
+  ["app/facturas/*",         "facturacion"],
+  ["lib/email/*",            "correo"],
+  ["lib/invoice-mail.ts",    "correo"],
+  ["lib/cron.ts",            "trabajos-programados"],
+  ["lib/reminders*.ts",      "trabajos-programados"],
+  ["app/api/cron/*",         "trabajos-programados"]
+]

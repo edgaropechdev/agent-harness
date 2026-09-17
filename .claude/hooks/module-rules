@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""Inyecta las reglas del módulo al leer o editar uno de sus ficheros.
+
+Las reglas de módulo salieron de AGENTS.md a rules/ para que no compitan
+las quince a la vez por la atención. Este hook las devuelve en el único momento
+en que importan: cuando se toca el fichero que gobiernan.
+
+Nunca bloquea y nunca falla ruidosamente: ante cualquier error, exit 0 sin
+salida. Es una comodidad; la garantía es la tabla de AGENTS.md.
+"""
+
+import fnmatch
+import hashlib
+import json
+import os
+import sys
+import tempfile
+
+# El MAPA vive en `rules-map.json`, no aquí.
+#
+# En el producto donde esto corre es una lista literal en este mismo fichero,
+# con un centenar de globs curados a mano. Se sacó a JSON para este repositorio
+# por una sola razón: publicar el mecanismo no debería publicar el árbol de
+# ficheros de un producto privado. El resto del hook está tal cual.
+#
+# Formato: [["glob relativo a la raíz", "slug en rules/"], ...]
+# El orden importa: el hook acumula slugs, así que un fichero puede recibir
+# varios juegos de reglas y los recibe en el orden en que aparecen aquí.
+
+
+def cargar_mapa():
+    ruta = os.path.join(raiz(), "rules-map.json")
+    try:
+        with open(ruta, encoding="utf-8") as fh:
+            return [(patron, slug) for patron, slug in json.load(fh)]
+    except (OSError, ValueError):
+        return []
+
+
+def raiz():
+    d = os.environ.get("CLAUDE_PROJECT_DIR")
+    if d and os.path.isdir(os.path.join(d, "rules")):
+        return d
+    # el hook vive en <raiz>/.claude/hooks/
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def relativa(file_path, root):
+    p = os.path.normpath(file_path)
+    if os.path.isabs(p):
+        try:
+            p = os.path.relpath(p, root)
+        except ValueError:
+            return None
+    return None if p.startswith("..") else p
+
+
+def casa(rel):
+    """Todos los slugs cuyo glob case. Un fichero puede tener varias reglas."""
+    vistos, out = set(), []
+    for patron, slug in cargar_mapa():
+        if slug in vistos:
+            continue
+        # fnmatch trata '*' como comodín que cruza '/', que es lo que queremos
+        # para los prefijos de directorio ("app/sitio/*" cubre subcarpetas).
+        if fnmatch.fnmatch(rel, patron):
+            vistos.add(slug)
+            out.append(slug)
+    return out
+
+
+def ya_inyectado(session_id, slug):
+    """Marca por sesión: reinyectar las mismas reglas veinte veces es ruido."""
+    if not session_id:
+        return False
+    clave = hashlib.sha256(f"{session_id}:{slug}".encode()).hexdigest()[:32]
+    marca = os.path.join(tempfile.gettempdir(), f"harness-reglas-{clave}")
+    if os.path.exists(marca):
+        return True
+    try:
+        open(marca, "w").close()
+    except OSError:
+        pass
+    return False
+
+
+def main():
+    datos = json.load(sys.stdin)
+    root = raiz()
+    rel = relativa(datos.get("tool_input", {}).get("file_path") or "", root)
+    if not rel:
+        return
+
+    partes = []
+    for slug in casa(rel):
+        ruta = os.path.join(root, "rules", f"{slug}.md")
+        if not os.path.exists(ruta) or ya_inyectado(datos.get("session_id"), slug):
+            continue
+        with open(ruta, encoding="utf-8") as fh:
+            partes.append(fh.read().strip())
+
+    if not partes:
+        return
+
+    aviso = (
+        f"Reglas no negociables que gobiernan `{rel}`. Salieron de AGENTS.md "
+        "verbatim; son el porqué de decisiones que desde fuera parecen "
+        "mejorables. No las contradigas sin decirlo explícitamente."
+    )
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": datos.get("hook_event_name", "PreToolUse"),
+            "additionalContext": aviso + "\n\n" + "\n\n---\n\n".join(partes),
+        }
+    }))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        pass
+    sys.exit(0)
